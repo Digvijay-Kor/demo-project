@@ -1,0 +1,63 @@
+name: Build and Deploy
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Build Docker image
+        run: |
+          cd app
+          docker build -t demo-project:${{ github.sha }} .
+          docker tag demo-project:${{ github.sha }} demo-project:latest
+
+      - name: Save Docker image
+        run: |
+          docker save demo-project:latest | gzip > /tmp/demo-project.tar.gz
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/demo-project
+          chmod 600 ~/.ssh/demo-project
+          ssh-keyscan -H ${{ secrets.APP_SERVER_IP }} >> ~/.ssh/known_hosts
+
+      - name: Copy image to app server
+        run: |
+          scp -i ~/.ssh/demo-project \
+            -o StrictHostKeyChecking=no \
+            /tmp/demo-project.tar.gz \
+            ubuntu@${{ secrets.APP_SERVER_IP }}:/tmp/demo-project.tar.gz
+
+      - name: Deploy on app server
+        run: |
+          ssh -i ~/.ssh/demo-project \
+            -o StrictHostKeyChecking=no \
+            ubuntu@${{ secrets.APP_SERVER_IP }} "
+              docker load < /tmp/demo-project.tar.gz
+              docker stop demo-app || true
+              docker rm demo-app || true
+              docker run -d \
+                --name demo-app \
+                -p 8080:8080 \
+                --restart always \
+                demo-project:latest
+            "
+
+      - name: Health check
+        run: |
+          sleep 5
+          curl -f http://${{ secrets.APP_SERVER_IP }}:8080/health || exit 1
+
+      - name: Confirm deployment
+        run: echo "Deployment successful! App running at http://${{ secrets.APP_SERVER_IP }}:8080"
